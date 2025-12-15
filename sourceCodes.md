@@ -1,7 +1,22 @@
 
-▷承知しました。これまでの議論で作成・改善した全てのソースコードを、ファイルを分けて省略なしで提示します。
+▷
 
-これをそのままコピペしてプロジェクトに配置すれば、\*\*「一覧表示」「追加」「削除」\*\*機能を持つサブスクリプション管理ダッシュボードが動作します。
+### ディレクトリ構造
+
+```text
+app/
+ ├── actions.ts           # Server Actions (DB操作ロジック)
+ ├── page.tsx             # メイン画面 (Server Component / データ取得)
+ └── _components/         # 画面固有のUIパーツ
+      ├── add-button.tsx  # 追加モーダル (Client Component)
+      ├── sub-list.tsx    # 一覧表示テーブル
+      └── del-button.tsx  # 削除アラート (Client Component)
+db/
+ ├── schema.ts            # Drizzleスキーマ定義
+ └── index.ts             # DB接続設定
+lib/
+ └── schema.ts            # Zodバリデーション定義 (共通)
+```
 
 -----
 
