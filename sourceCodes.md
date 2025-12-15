@@ -23,12 +23,6 @@ lib/
 
 -----
 
-ご指示通り、これまでのレビューと改善（v1.0 → v1.1 → v1.2）をすべて適用した**Subscription Manager v1.2 の完全なソースコード**を提示します。
-
-省略箇所はなく、そのままコピー＆ペーストして動作する状態になっています。
-
------
-
 # Subscription Manager v1.2 Complete Source Code
 
 ## 1\. ユーティリティ & 定数 (`lib/`)
