@@ -22,7 +22,7 @@ lib/
 
 -----
 
-# Subscription Manager v1.2 Complete Source Code
+# Subscription Manager v1.0 Complete Source Code
 
 ## 1\. ユーティリティ & 定数 (`lib/`)
 
