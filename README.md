@@ -1,141 +1,141 @@
-# Test_Project_one
 
 -----
 
-# 基本設計書: サブスクリプション一元管理ダッシュボード
+# 設計仕様書: Subscription Manager (v1.0 Final)
 
 ## 1\. プロジェクト概要
 
-  * **名称:** Subscription Manager (仮)
-  * **目的:** 散らばりがちなSaaSやサブスクリプション契約を一元管理し、固定費（Monthly/Yearly）を可視化する。
-  * **ターゲット:** 個人開発者、フリーランス、小規模チーム。
+  * **名称:** Subscription Manager
+  * **目的:** 散らばりがちなサブスクリプション契約を一元管理し、固定費を可視化する。
+  * **特徴:**
+      * **APIレス:** Next.js Server Actionsによる直接的なデータ操作。
+      * **型安全:** DBスキーマからフロントエンドまで一貫した型定義 (End-to-End Type Safety)。
+      * **高速UX:** Optimistic UI（楽観的更新）によるゼロレイテンシーな操作感。
 
 ## 2\. 技術スタック (Tech Stack)
 
-最新のNext.jsエコシステムを採用し、\*\*「APIレス」**かつ**「型安全」\*\*な開発を実現する構成。
-
-| カテゴリ | 技術選定 | 役割 |
-| :--- | :--- | :--- |
-| **Framework** | **Next.js 14+ (App Router)** | フルスタックフレームワーク |
-| **Language** | **TypeScript** | 静的型付けによる品質担保 |
-| **Styling** | **Tailwind CSS** | ユーティリティファーストなCSS |
-| **UI Library** | **shadcn/ui** | アクセシビリティ対応コンポーネント集 |
-| **Database** | **PostgreSQL** | リレーショナルデータベース |
-| **ORM** | **Drizzle ORM** | 軽量かつ型安全なSQLビルダー |
-| **Validation** | **Zod** | スキーマ検証 (Frontend/Backend共通) |
-| **Icon** | **Lucide React** | 軽量アイコンセット |
-
------
+| カテゴリ | 技術選定 | 役割 | 備考 |
+| :--- | :--- | :--- | :--- |
+| **Framework** | **Next.js 15 (App Router)** | フルスタックFW | Server Actions / UseOptimistic |
+| **Language** | **TypeScript** | 言語 | Strict Mode |
+| **Styling** | **Tailwind CSS** | スタイリング | |
+| **UI Library** | **shadcn/ui** | コンポーネント | Dialog, Table, Card, Button |
+| **Feedback** | **Sonner** | 通知 (Toast) | ノンブロッキングなUX |
+| **Database** | **PostgreSQL** | RDB | |
+| **ORM** | **Drizzle ORM** | DB操作 | `drizzle-kit` によるマイグレーション |
+| **Validation** | **Zod** | スキーマ検証 | Backend/Frontend共通利用 |
 
 ## 3\. アプリケーション・アーキテクチャ
 
-Next.jsの **Server Actions** を活用し、従来のREST API層を排除したシンプルな構成です。
+### 3.1 ディレクトリ構造 (最終版)
 
-### ディレクトリ構造
+機能（Features）と責務（Concerns）に基づき整理されています。
 
 ```text
 app/
- ├── actions.ts           # Server Actions (DB操作ロジック)
- ├── page.tsx             # メイン画面 (Server Component / データ取得)
- └── _components/         # 画面固有のUIパーツ
-      ├── add-button.tsx  # 追加モーダル (Client Component)
-      ├── sub-list.tsx    # 一覧表示テーブル
-      └── del-button.tsx  # 削除アラート (Client Component)
+ ├── actions.ts                  # Server Actions (DB操作・認証・検証)
+ ├── page.tsx                    # メイン画面 (Server Component / データ取得)
+ └── _components/                # プレゼンテーション層
+      ├── add-subscription-button.tsx  # 追加モーダル (Client / Toast対応)
+      └── subscription-list.tsx        # 一覧リスト (Client / Optimistic UI対応)
 db/
- ├── schema.ts            # Drizzleスキーマ定義
- └── index.ts             # DB接続設定
+ ├── index.ts                    # DB接続クライアント
+ └── schema.ts                   # Drizzleスキーマ & 型定義 (Single Source of Truth)
 lib/
- └── schema.ts            # Zodバリデーション定義 (共通)
+ ├── constants.ts                # 定数定義 (Enum, Label, Currency)
+ ├── utils.ts                    # 純粋関数 (日付計算, ビジネスロジック)
+ └── validations.ts              # Zodスキーマ (Form Validation)
 ```
 
-### データフロー (概念図)
+### 3.2 データフロー (Optimistic UI)
+
+ユーザーの操作感を最優先するため、\*\*「サーバーの完了を待たずに画面を更新する」\*\*フローを採用しています。
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Page (Server)
-    participant Component (Client)
+    participant UI (Client)
     participant Action (Server)
     participant DB
 
-    Note over User, DB: 画面表示 (Read)
-    User->>Page (Server): アクセス
-    Page (Server)->>DB: クエリ実行 (getSubscriptions)
-    DB-->>Page (Server): データ返却
-    Page (Server)-->>User: HTML生成・表示
+    Note over User, DB: 削除フロー (Optimistic Update)
+    User->>UI (Client): 削除ボタン押下
+    UI (Client)->>UI (Client): 【即時反映】リストから該当行を消去
+    UI (Client)->>Action (Server): deleteSubscription(id)実行
+    
+    rect rgb(240, 240, 240)
+        Note right of UI (Client): バックグラウンド処理
+        Action (Server)->>Action (Server): ユーザー所有権チェック
+        Action (Server)->>DB: DELETE実行
+        DB-->>Action (Server): 完了
+        Action (Server)-->>UI (Client): 成功レスポンス
+    end
 
-    Note over User, DB: データ追加 (Write)
-    User->>Component (Client): フォーム入力・送信
-    Component (Client)->>Action (Server): addSubscription(data)
-    Action (Server)->>Action (Server): Zodバリデーション
-    Action (Server)->>DB: INSERT実行
-    Action (Server)->>Page (Server): revalidatePath('/')
-    Page (Server)-->>User: 最新データで画面更新
+    UI (Client)->>User: Toast通知「削除しました」
 ```
 
------
-
-## 4\. データベース設計 (Schema)
+## 4\. データベース設計
 
 **テーブル名:** `subscriptions`
 
-ユーザー1人が複数のサブスクリプションを持つ「1対多」の関係を想定しています（現在はMVPのためユーザーIDは固定）。
+マジックナンバーや文字列のハードコーディングを防ぐため、アプリ側の `constants.ts` と連携した定義を行います。
 
-| カラム名 | 型 (Type) | 必須 | 説明 |
-| :--- | :--- | :--- | :--- |
-| `id` | UUID | PK | 一意の識別子 (defaultRandom) |
-| `user_id` | Text | YES | 所有ユーザーID (Auth連携用) |
-| `name` | Text | YES | サービス名 (例: Netflix) |
-| `price` | Integer | YES | 金額 |
-| `currency` | Text | YES | 通貨 (Default: JPY) |
-| `cycle` | Enum | YES | `monthly` または `yearly` |
-| `next_payment`| Date | YES | 次回支払日 |
-| `is_active` | Boolean | YES | 契約状態 (Default: true) |
-| `created_at` | Timestamp | YES | 作成日時 |
+| カラム名 | 型 | 制約/Default | 定数参照 | 説明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | UUID | PK, Default Random | - | - |
+| `user_id` | Text | Not Null | - | 所有者ID (Auth連携用) |
+| `name` | Text | Not Null | - | サービス名 |
+| `price` | Integer | Not Null | - | 金額 |
+| `currency` | Text | Default: 'JPY' | `CURRENCIES` | 通貨コード |
+| `cycle` | Text | Not Null | `SUBSCRIPTION_CYCLES` | `monthly` / `yearly` |
+| `next_payment` | Date | Not Null | - | YYYY-MM-DD |
+| `created_at` | Timestamp | Default Now | - | - |
 
------
+## 5\. ロジック & ビジネスルール
 
-## 5\. UI/UX コンポーネント設計
+### 5.1 ビジネスロジック (Calculation)
 
-### A. Dashboard Page (`page.tsx`)
+UIコンポーネント内に計算ロジックを持たせず、`lib/utils.ts` に分離。
 
-画面全体のレイアウトとデータフェッチを担当。
+  * **月額固定費の算出:**
+      * `cycle === 'monthly'` : そのまま加算。
+      * `cycle === 'yearly'` : `price / 12` (四捨五入) して加算。
+      * これにより、支払いサイクルが異なる契約も「月あたりの負担額」として比較可能にする。
 
-  * **KPI Cards:**
-      * 「月額固定費合計」: `cycle = 'monthly'` の合計を表示。
-      * 「契約数」: レコードの総数を表示。
-  * **Main Content:**
-      * サブスクリプション一覧を表示するエリア。
+### 5.2 日付管理 (Timezone Handling)
 
-### B. Add Subscription Modal (`add-subscription-button.tsx`)
+  * **課題:** `new Date()` はUTC基準のため、日本時間の深夜〜朝9時に操作すると「昨日」の日付になる。
+  * **解決策:** ブラウザのタイムゾーンオフセットを考慮した `getLocalTodayString()` ユーティリティを使用し、常にユーザーの現地時間の「今日」を初期値とする。
 
-  * **Trigger:** 「＋ 追加する」ボタン。
-  * **UI:** Dialog (Modal) 内にフォームを展開。
-  * **Validation:**
-      * サービス名: 必須
-      * 金額: 数値のみ、1以上
-      * サイクル: 選択必須
-  * **Feedback:** 送信成功時にダイアログを自動で閉じ、フォームをリセット。
+### 5.3 バリデーション (Validation)
 
-### C. Delete Confirmation (`delete-button.tsx`)
+`lib/validations.ts` に集約されたZodスキーマにより、以下のルールを強制する。
 
-  * **Trigger:** リスト各行のゴミ箱アイコン。
-  * **Safety:** `AlertDialog` を使用し、誤操作を防止。「本当に削除しますか？」と確認。
-  * **State:** 削除処理中 (`isPending`) はボタンを無効化し、連打を防止。
+  * **Service Name:** 1文字以上必須。
+  * **Price:** 1以上の数値。
+  * **Cycle:** 定数リスト (`monthly`, `yearly`) に含まれる値のみ許容。
 
------
+## 6\. セキュリティ設計
 
-## 6\. 今後のロードマップ (Next Phase)
+Server Actionsは公開APIエンドポイントと同等であるため、以下の対策を実装済み。
 
-MVP完成後の機能拡張案です。
+  * **所有者検証 (Ownership Verification):**
+      * UPDATE / DELETE 操作時には、必ず `WHERE id = ? AND user_id = ?` の条件を使用。
+      * IDを知り得た第三者による不正な削除・改ざんを防止。
+
+## 7\. 今後の拡張ロードマップ
+
+基盤コードが整ったため、以下の機能拡張がスムーズに行えます。
 
 1.  **認証機能の統合 (Auth.js / Clerk)**
-      * 固定値の `DEMO_USER_ID` を廃止し、ログインユーザーごとのデータ分離を実現。
-2.  **編集 (Edit) 機能**
-      * 登録済みデータの修正機能（金額変更、支払日更新など）。
-3.  **通貨対応 (Multi-currency)**
-      * USD ($) や EUR (€) の入力を可能にし、現在のレートで円換算して合計を表示。
-4.  **通知機能 (Notification)**
-      * 支払日の3日前にメールやSlackで通知を送る（Vercel Cron Jobs等を利用）。
+      * `DEMO_USER_ID` 定数を、セッションから取得した `userId` に置き換えるだけで対応完了。
+2.  **多通貨対応 (Multi-currency)**
+      * `currency` カラムは実装済み。`lib/utils.ts` の計算ロジックに為替レート変換を追加するだけで機能する。
+3.  **編集機能 (Edit Mode)**
+      * `add-subscription-button.tsx` を流用し、初期値 (`defaultValues`) を渡す形での実装が可能。
 
 -----
+
+この設計書は、今回のリファクタリングで実装されたコードベースと完全に一致しています。開発チーム（あるいは未来の自分）への引き継ぎ資料としてご利用ください。
+
+**次のステップとして、認証機能（Auth.jsなど）の組み込みに進みますか？**
