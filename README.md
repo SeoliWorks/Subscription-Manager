@@ -1,13 +1,13 @@
 
 -----
 
-# 設計仕様書: Subscription Manager (v1.1)
+# 設計仕様書: Subscription Manager (v1.0)
 
 ## 1\. プロジェクト概要
 
   * **名称:** Subscription Manager
   * **目的:** 散らばりがちなサブスクリプション契約を一元管理し、固定費を可視化する。
-  * **バージョン:** 1.1
+  * **バージョン:** 1.0
   * **特徴:**
       * **APIレス:** Next.js Server Actionsによる直接的なデータ操作。
       * **End-to-End Type Safety:** DBからフロントエンドまで完全な型安全性を提供。
@@ -29,7 +29,7 @@
 
 ## 3\. アプリケーション・アーキテクチャ
 
-### 3.1 ディレクトリ構造 (v1.1)
+### 3.1 ディレクトリ構造 (v1.0)
 
 ```text
 app/
@@ -51,8 +51,8 @@ lib/
 ### 3.2 データフロー & セキュリティ
 
   * **Server Actions:**
-      * クライアントから `path` 引数を受け取る設計を廃止。
-      * サーバー内部で `revalidatePath('/')` を固定実行し、意図しないキャッシュパージを防ぐ。
+      * クライアントから `path` 引数を受け取る設計を廃止し、内部で `revalidatePath('/')` を固定実行。
+      * バリデーションエラー時は `fieldErrors` を返却し、UI上の各入力項目へ詳細なフィードバックを行う。
   * **Optimistic UI:**
       * `useOptimistic` を使用し、サーバー応答を待たずにリストを即時更新。
       * 失敗時はToast通知と共に自動的にロールバック（Reactの標準挙動）。
@@ -73,20 +73,20 @@ lib/
 | `category` | Text | Default: 'general' | - |
 | `is_active` | Boolean | Default: true | - |
 | `created_at` | Timestamp | Default Now | - |
+| `updated_at` | Timestamp | Default Now | 更新日時 |
 
 ## 5\. ロジック & ビジネスルール
 
 ### 5.1 通貨・金額計算 (Minor Units Handling)
 
 1.  **DB保存 (Write):**
-      * 入力値（例: `10.50` USD）を `decimals` に基づき整数化 (`1050`) して保存。
+      * IEEE 754 浮動小数点誤差を防ぐため、文字列操作により小数点を移動させ整数化 (`10.99` -\> `1099`) して保存。
 2.  **集計 (Aggregation):**
       * `calculateMonthlyAggregations` 関数により、通貨ごとに個別に集計。
-      * 戻り値: `{ JPY: 5000, USD: 20.50, EUR: 0 }` (実数)
+      * 年額プランの月割り計算時に発生する端数は、項目ごとに厳密な丸め処理を行う。
 3.  **表示 (Read):**
       * **DB値の表示:** `formatCurrency` (DB整数 -\> 表示文字列)
       * **集計値の表示:** `formatDisplayPrice` (実数 -\> 表示文字列)
-      * ※計算結果を再変換しないよう厳密に関数を分離。
 
 ### 5.2 日付管理 (Timezone Safe)
 
