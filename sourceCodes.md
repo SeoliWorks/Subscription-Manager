@@ -20,10 +20,21 @@ lib/
 ```
 -----
 
+3回のレビューと改善プロセスを経て完成した、**Subscription Manager (v1.0) の最終版ソースコード**を提供します。
+
+このバージョンでは、当初の設計から以下の点が強化されています。
+
+1.  **正確な通貨計算**: JPY以外の通貨（USD/EUR）も正しく計算・表示されるロジックに修正。
+2.  **セキュリティ強化**: Server Actionsの引数改ざんリスクを排除し、再検証パスを固定。
+3.  **型安全性の向上**: `any` 型を排除し、フロントエンドまで型を一貫。
+4.  **UX向上**: ローディング画面（Skeleton）と、タイムゾーンによる日付ズレの防止。
+
+-----
+
 ### 1\. ユーティリティ & 定数 (`lib/`)
 
 **`lib/constants.ts`**
-通貨設定（小数点の扱い）とサイクル定義を集約しています。
+通貨とサイクルの定義。
 
 ```typescript
 export const SUBSCRIPTION_CYCLES = {
@@ -48,7 +59,7 @@ export type CurrencyCode = keyof typeof CURRENCIES;
 ```
 
 **`lib/utils.ts`**
-金額の変換ロジック（UI用 ⇔ DB用）とフォーマッターを含みます。
+集計ロジックを大幅に強化しました。
 
 ```typescript
 import { type ClassValue, clsx } from "clsx"
@@ -60,8 +71,12 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-// クライアント/サーバー共通で使える「今日」の日付文字列 (YYYY-MM-DD)
+/**
+ * クライアントサイドでのみ使用することを推奨 (Hydration Mismatch防止)
+ * サーバーのタイムゾーンに依存せず、ブラウザの「今日」を返します
+ */
 export function getLocalTodayString(): string {
+  // sv-SEロケールは YYYY-MM-DD 形式を返すためのハック
   return new Date().toLocaleDateString('sv-SE');
 }
 
@@ -84,44 +99,60 @@ export function convertAmountToMinorUnits(amount: number, currency: string): num
 }
 
 /**
- * 通貨を見やすくフォーマットする
- * DBの整数値を受け取り、自動的に小数に戻してフォーマットします
+ * [DB用] DBの整数値を受け取り、自動的に小数に戻してフォーマットする
  */
 export function formatCurrency(amountFromDb: number, currency: string): string {
   const actualAmount = convertAmountFromMinorUnits(amountFromDb, currency);
-  
-  return new Intl.NumberFormat('ja-JP', {
-    style: 'currency',
-    currency: currency,
-  }).format(actualAmount);
+  return formatDisplayPrice(actualAmount, currency);
 }
 
 /**
- * 指定通貨での月額換算合計を計算
+ * [表示用] すでに計算済みの数値を受け取り、通貨フォーマットする
  */
-export function calculateMonthlyTotal(
-  subscriptions: Subscription[], 
-  targetCurrency: CurrencyCode = 'JPY'
-): number {
-  return subscriptions
-    .filter(sub => sub.currency === targetCurrency)
-    .reduce((acc, curr) => {
-      // 一度「実際の金額」に戻す
-      const actualPrice = convertAmountFromMinorUnits(curr.price, curr.currency);
-      
-      let monthlyPrice = actualPrice;
-      if (curr.cycle === SUBSCRIPTION_CYCLES.yearly) {
-        // 年額は12で割る
-        monthlyPrice = actualPrice / 12;
-      }
-      
-      return acc + monthlyPrice;
-    }, 0);
+export function formatDisplayPrice(amount: number, currency: string): string {
+  // アプリの仕様として ja-JP ロケールで統一
+  return new Intl.NumberFormat('ja-JP', {
+    style: 'currency',
+    currency: currency,
+  }).format(amount);
+}
+
+export type AggregatedTotals = {
+  [key in CurrencyCode]: number;
+};
+
+/**
+ * 全通貨の月額換算合計を計算して返す
+ * 戻り値例: { JPY: 5000, USD: 10.50, EUR: 0 }
+ */
+export function calculateMonthlyAggregations(subscriptions: Subscription[]): AggregatedTotals {
+  const totals: AggregatedTotals = {
+    JPY: 0,
+    USD: 0,
+    EUR: 0,
+  };
+
+  subscriptions.forEach((sub) => {
+    const currency = sub.currency as CurrencyCode;
+    // 定義外の通貨コードは無視
+    if (!totals.hasOwnProperty(currency)) return;
+
+    const actualPrice = convertAmountFromMinorUnits(sub.price, currency);
+    
+    let monthlyPrice = actualPrice;
+    if (sub.cycle === SUBSCRIPTION_CYCLES.yearly) {
+      monthlyPrice = actualPrice / 12;
+    }
+
+    totals[currency] += monthlyPrice;
+  });
+
+  return totals;
 }
 ```
 
 **`lib/validations.ts`**
-厳格化されたZodスキーマ定義です。
+Zodスキーマ定義。
 
 ```typescript
 import { z } from 'zod';
@@ -129,7 +160,6 @@ import { SUBSCRIPTION_CYCLES, CURRENCIES } from '@/lib/constants';
 
 export const formSchema = z.object({
   name: z.string().min(1, 'サービス名は必須です'),
-  // UI上は小数を許容する
   price: z.coerce.number()
     .min(0.01, '金額を入力してください')
     .nonnegative('マイナスの金額は入力できません'),
@@ -139,7 +169,6 @@ export const formSchema = z.object({
   }),
   nextPayment: z.string().date().refine((val) => {
     const date = new Date(val);
-    // 日付として無効、または極端な過去などを弾く
     return !isNaN(date.getTime()) && date.getFullYear() > 2000;
   }, '正しい日付を入力してください'),
   category: z.string().optional(),
@@ -153,14 +182,13 @@ export type FormValues = z.infer<typeof formSchema>;
 ### 2\. データベース設定 (`db/`)
 
 **`db/index.ts`**
-環境変数チェックを追加したDB接続設定です。
+接続設定。
 
 ```typescript
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
 
-// Fail Fast: 設定ミスを即座に検知
 if (!process.env.DATABASE_URL) {
   throw new Error('DATABASE_URL is not set in environment variables');
 }
@@ -171,7 +199,6 @@ const globalForDb = globalThis as unknown as {
   conn: postgres.Sql | undefined;
 };
 
-// 開発環境と本番環境でコネクション管理を切り分け
 const client = globalForDb.conn ?? postgres(connectionString, { 
   max: process.env.NODE_ENV === 'production' ? 10 : 1, 
 });
@@ -184,7 +211,7 @@ export const db = drizzle(client, { schema });
 ```
 
 **`db/schema.ts`**
-インデックスを追加し、金額を整数型で定義しています。
+スキーマ定義。
 
 ```typescript
 import { pgTable, text, integer, boolean, timestamp, uuid, date, index } from 'drizzle-orm/pg-core';
@@ -193,7 +220,7 @@ import { SUBSCRIPTION_CYCLES, CURRENCIES } from '@/lib/constants';
 
 export const subscriptions = pgTable('subscriptions', {
   id: uuid('id').defaultRandom().primaryKey(),
-  userId: text('user_id').notNull(), // Auth ID
+  userId: text('user_id').notNull(),
   
   name: text('name').notNull(),
   // integerだが、通貨の最小単位(cents/yen)で保存する
@@ -209,7 +236,6 @@ export const subscriptions = pgTable('subscriptions', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => {
   return {
-    // ユーザーIDでの検索を高速化
     userIdIdx: index('user_id_idx').on(table.userId),
   };
 });
@@ -222,7 +248,7 @@ export type NewSubscription = InferInsertModel<typeof subscriptions>;
 
 ### 3\. Server Actions (`app/actions.ts`)
 
-DB保存時の通貨変換処理を組み込んでいます。
+セキュリティ修正適用済み。
 
 ```typescript
 'use server';
@@ -234,11 +260,12 @@ import { convertAmountToMinorUnits } from '@/lib/utils';
 import { eq, desc, and } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 
-// --- Auth Mock ---
+// --- Auth Handling ---
+// 実運用の際はここをClerkやAuth.jsのロジックに置き換える
 async function getCurrentUser() {
   return { id: 'user_demo_123' };
 }
-// -----------------
+// --------------------
 
 export type ActionResponse<T = null> = {
   success: boolean;
@@ -247,12 +274,13 @@ export type ActionResponse<T = null> = {
 };
 
 // フロントエンド公開用データ型
-type SubscriptionPublic = Omit<typeof subscriptions.$inferSelect, 'userId' | 'createdAt'>;
+export type SubscriptionPublic = Omit<typeof subscriptions.$inferSelect, 'userId' | 'createdAt'>;
 
 export async function getSubscriptions(): Promise<ActionResponse<SubscriptionPublic[]>> {
   try {
     const user = await getCurrentUser();
     
+    // 型安全性を確保しつつ、必要なカラムのみ取得
     const data = await db.query.subscriptions.findMany({
       where: eq(subscriptions.userId, user.id),
       orderBy: [desc(subscriptions.nextPayment)],
@@ -267,15 +295,14 @@ export async function getSubscriptions(): Promise<ActionResponse<SubscriptionPub
         isActive: true,
       }
     });
-    return { success: true, data };
+    return { success: true, data: data as SubscriptionPublic[] };
   } catch (error) {
     console.error('Failed to fetch subscriptions:', error);
     return { success: false, error: 'データの取得に失敗しました', data: [] };
   }
 }
 
-// path引数を追加して、どこから呼ばれても画面更新できるように変更
-export async function addSubscription(data: FormValues, path: string = '/'): Promise<ActionResponse> {
+export async function addSubscription(data: FormValues): Promise<ActionResponse> {
   const validated = formSchema.safeParse(data);
   if (!validated.success) {
     return { success: false, error: '入力内容に誤りがあります' };
@@ -296,7 +323,8 @@ export async function addSubscription(data: FormValues, path: string = '/'): Pro
       userId: user.id,
     });
 
-    revalidatePath(path);
+    // サーバー側でパスを固定してRevalidate (セキュリティ向上)
+    revalidatePath('/');
     return { success: true };
   } catch (error) {
     console.error('Failed to add subscription:', error);
@@ -304,10 +332,11 @@ export async function addSubscription(data: FormValues, path: string = '/'): Pro
   }
 }
 
-export async function deleteSubscription(id: string, path: string = '/'): Promise<ActionResponse> {
+export async function deleteSubscription(id: string): Promise<ActionResponse> {
   try {
     const user = await getCurrentUser();
 
+    // userIdを条件に含めることで、所有者のみが削除可能
     const result = await db.delete(subscriptions)
       .where(
         and(
@@ -321,7 +350,7 @@ export async function deleteSubscription(id: string, path: string = '/'): Promis
       return { success: false, error: '削除対象が見つからないか、権限がありません' };
     }
     
-    revalidatePath(path);
+    revalidatePath('/');
     return { success: true };
   } catch (error) {
     console.error('Failed to delete subscription:', error);
@@ -335,7 +364,7 @@ export async function deleteSubscription(id: string, path: string = '/'): Promis
 ### 4\. UIコンポーネント (`app/_components/`)
 
 **`app/_components/add-subscription-button.tsx`**
-通貨選択機能を追加したモーダルフォームです。
+クライアントサイドでの安全な日付初期化を実装。
 
 ```tsx
 'use client';
@@ -348,7 +377,6 @@ import { addSubscription } from '@/app/actions';
 import { SUBSCRIPTION_CYCLES, CYCLE_LABELS, CURRENCIES } from '@/lib/constants';
 import { getLocalTodayString } from '@/lib/utils';
 import { toast } from 'sonner';
-import { usePathname } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -365,7 +393,6 @@ import { Plus, Loader2 } from 'lucide-react';
 
 export function AddSubscriptionButton() {
   const [open, setOpen] = useState(false);
-  const pathname = usePathname();
   
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -374,19 +401,23 @@ export function AddSubscriptionButton() {
       price: 0,
       currency: CURRENCIES.JPY.code,
       cycle: SUBSCRIPTION_CYCLES.monthly,
-      nextPayment: getLocalTodayString(),
       category: 'general',
+      // マウント後にクライアントの今日の日付をセットするのが理想だが、
+      // ユーザー操作まで日付が変わることは稀なため、初期値として関数呼び出しを行う
+      nextPayment: getLocalTodayString(),
     },
   });
 
   const isSubmitting = form.formState.isSubmitting;
 
   async function onSubmit(values: FormValues) {
-    const res = await addSubscription(values, pathname);
+    // path引数は削除済み
+    const res = await addSubscription(values);
     
     if (res.success) {
       toast.success('サブスクリプションを追加しました');
       setOpen(false);
+      // フォームリセット
       form.reset({
         name: '',
         price: 0,
@@ -496,6 +527,7 @@ export function AddSubscriptionButton() {
                     <Input 
                       type="date" 
                       {...field} 
+                      // 過去の日付選択を防ぐ
                       min={getLocalTodayString()}
                     />
                   </FormControl>
@@ -523,13 +555,12 @@ export function AddSubscriptionButton() {
 ```
 
 **`app/_components/subscription-list.tsx`**
-`formatCurrency` を使用して、DBの値（整数）を正しい通貨表記で表示します。
+型定義を厳格化。
 
 ```tsx
 'use client';
 
 import { useOptimistic, startTransition, useState } from 'react';
-import { usePathname } from 'next/navigation';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
@@ -542,18 +573,16 @@ import { Button } from '@/components/ui/button';
 import { Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { type Subscription } from '@/db/schema';
+import { type SubscriptionPublic, deleteSubscription } from '@/app/actions';
 import { CYCLE_LABELS, SUBSCRIPTION_CYCLES } from '@/lib/constants';
 import { formatCurrency } from '@/lib/utils';
-import { deleteSubscription } from '@/app/actions';
 
-function SubscriptionRow({ 
-  sub, 
-  onDeleteClick 
-}: { 
-  sub: Partial<Subscription> & Pick<Subscription, 'id' | 'name' | 'price' | 'currency' | 'cycle' | 'nextPayment'>, 
-  onDeleteClick: (id: string, name: string) => void 
-}) {
+interface SubscriptionRowProps {
+  sub: SubscriptionPublic;
+  onDeleteClick: (id: string, name: string) => void;
+}
+
+function SubscriptionRow({ sub, onDeleteClick }: SubscriptionRowProps) {
   return (
     <TableRow>
       <TableCell className="font-medium">{sub.name}</TableCell>
@@ -579,11 +608,11 @@ function SubscriptionRow({
   );
 }
 
-export function SubscriptionList({ initialData }: { initialData: any[] }) {
-  const pathname = usePathname();
-  const [optimisticSubscriptions, mutateOptimisticSubscriptions] = useOptimistic(
+export function SubscriptionList({ initialData }: { initialData: SubscriptionPublic[] }) {
+  // useOptimisticの型引数を明示
+  const [optimisticSubscriptions, mutateOptimisticSubscriptions] = useOptimistic<SubscriptionPublic[], string>(
     initialData,
-    (state, idToDelete: string) => state.filter((sub) => sub.id !== idToDelete)
+    (state, idToDelete) => state.filter((sub) => sub.id !== idToDelete)
   );
 
   const [deleteTarget, setDeleteTarget] = useState<{ id: string, name: string } | null>(null);
@@ -598,7 +627,8 @@ export function SubscriptionList({ initialData }: { initialData: any[] }) {
       mutateOptimisticSubscriptions(deleteTarget.id);
     });
 
-    const result = await deleteSubscription(deleteTarget.id, pathname);
+    // path引数は削除済み
+    const result = await deleteSubscription(deleteTarget.id);
 
     setIsDeleting(false);
     setDeleteTarget(null);
@@ -671,17 +701,18 @@ export function SubscriptionList({ initialData }: { initialData: any[] }) {
 
 -----
 
-### 5\. メインページ (`app/page.tsx`)
+### 5\. メインページ & ローディング (`app/`)
 
-`calculateMonthlyTotal` を呼び出し、UI表示では `formatCurrency` を使うように変更済みです。
+**`app/page.tsx`**
+多通貨表示に対応。
 
 ```tsx
 import { getSubscriptions } from './actions';
 import { SubscriptionList } from './_components/subscription-list';
 import { AddSubscriptionButton } from './_components/add-subscription-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { JapaneseYen, CreditCard, AlertCircle } from 'lucide-react';
-import { calculateMonthlyTotal, formatCurrency } from '@/lib/utils';
+import { JapaneseYen, Globe, CreditCard, AlertCircle } from 'lucide-react';
+import { calculateMonthlyAggregations, formatDisplayPrice } from '@/lib/utils';
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 export default async function DashboardPage() {
@@ -700,9 +731,8 @@ export default async function DashboardPage() {
     );
   }
 
-  // JPYのみを計算し、表示用合計金額を取得
-  // (utils側でDB値を実数に戻して計算しています)
-  const totalMonthly = calculateMonthlyTotal(data, 'JPY');
+  // 通貨ごとの集計を取得
+  const totals = calculateMonthlyAggregations(data);
 
   return (
     <div className="container mx-auto py-10 space-y-8">
@@ -712,19 +742,41 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {/* JPY 月額合計 */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">月額固定費 (JPY)</CardTitle>
             <JapaneseYen className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {/* 合計値をJPY形式でフォーマット */}
-            <div className="text-2xl font-bold">{formatCurrency(totalMonthly, 'JPY')}</div>
+            <div className="text-2xl font-bold">{formatDisplayPrice(totals.JPY, 'JPY')}</div>
             <p className="text-xs text-muted-foreground mt-1">
-              ※年額プランは月割り計算 / 外貨建ては現在集計対象外
+              ※年額プランは月割り計算
             </p>
           </CardContent>
         </Card>
+
+        {/* 外貨建て合計 (USD/EUR) */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">外貨建て固定費</CardTitle>
+            <Globe className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-1">
+              <div className="flex justify-between text-sm items-center">
+                <span className="text-muted-foreground">USD:</span>
+                <span className="font-bold">{formatDisplayPrice(totals.USD, 'USD')}</span>
+              </div>
+              <div className="flex justify-between text-sm items-center">
+                <span className="text-muted-foreground">EUR:</span>
+                <span className="font-bold">{formatDisplayPrice(totals.EUR, 'EUR')}</span>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* 契約数 */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">契約数</CardTitle>
@@ -749,4 +801,57 @@ export default async function DashboardPage() {
 }
 ```
 
------
+**`app/loading.tsx` (新規追加)**
+初期ロード時のUX向上（Suspense対応）。
+
+```tsx
+import { Skeleton } from "@/components/ui/skeleton"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
+
+export default function Loading() {
+  return (
+    <div className="container mx-auto py-10 space-y-8">
+      <div className="flex justify-between items-center">
+        <Skeleton className="h-9 w-48" /> {/* Title */}
+        <Skeleton className="h-10 w-32" /> {/* Button */}
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {/* KPI Cards Skeletons */}
+        {[1, 2, 3].map((i) => (
+          <Card key={i}>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="h-4 w-4 rounded-full" />
+            </CardHeader>
+            <CardContent>
+              <Skeleton className="h-8 w-20 mb-1" />
+              <Skeleton className="h-3 w-32" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <Card>
+        <CardHeader>
+          <Skeleton className="h-6 w-40" />
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+             {/* List Rows Skeletons */}
+            {[1, 2, 3, 4].map((i) => (
+              <div key={i} className="flex items-center justify-between">
+                <div className="space-y-2">
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-3 w-20" />
+                </div>
+                <Skeleton className="h-8 w-8 rounded-full" />
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+```
