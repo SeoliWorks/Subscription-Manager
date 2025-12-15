@@ -21,9 +21,10 @@ lib/
 
 -----
 
-#### 1\. ユーティリティ & 定義 (`lib/`)
+### 1\. ユーティリティ & 定数 (`lib/`)
 
 **`lib/constants.ts`**
+通貨設定（小数点の扱い）とサイクル定義を集約しています。
 
 ```typescript
 export const SUBSCRIPTION_CYCLES = {
@@ -36,20 +37,25 @@ export const CYCLE_LABELS = {
   [SUBSCRIPTION_CYCLES.yearly]: '年額',
 };
 
+// 通貨設定
+// decimals: DB保存時の倍率 (例: 2なら x100)
 export const CURRENCIES = {
-  JPY: 'JPY',
-  USD: 'USD',
-  EUR: 'EUR',
+  JPY: { code: 'JPY', symbol: '¥', decimals: 0 },
+  USD: { code: 'USD', symbol: '$', decimals: 2 },
+  EUR: { code: 'EUR', symbol: '€', decimals: 2 },
 } as const;
+
+export type CurrencyCode = keyof typeof CURRENCIES;
 ```
 
-**`lib/utils.ts`** (通貨フォーマット機能を追加)
+**`lib/utils.ts`**
+金額の変換ロジック（UI用 ⇔ DB用）とフォーマッターを含みます。
 
 ```typescript
 import { type ClassValue, clsx } from "clsx"
 import { twMerge } from "tailwind-merge"
 import { type Subscription } from "@/db/schema"
-import { SUBSCRIPTION_CYCLES, CURRENCIES } from "./constants"
+import { SUBSCRIPTION_CYCLES, CURRENCIES, type CurrencyCode } from "./constants"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -57,60 +63,86 @@ export function cn(...inputs: ClassValue[]) {
 
 // クライアント/サーバー共通で使える「今日」の日付文字列 (YYYY-MM-DD)
 export function getLocalTodayString(): string {
-  // 'sv-SE' ロケールは ISO 8601 (YYYY-MM-DD) 形式と互換性がある
   return new Date().toLocaleDateString('sv-SE');
 }
 
 /**
- * 通貨を見やすくフォーマットする
- * @param price 金額
- * @param currency 通貨コード (JPY, USD, etc.)
+ * DB保存値(整数)を、UI表示用の数値(小数含む)に戻す
+ * 例: USD, 999 -> 9.99
  */
-export function formatCurrency(price: number, currency: string): string {
+export function convertAmountFromMinorUnits(amount: number, currency: string): number {
+  const config = CURRENCIES[currency as CurrencyCode] ?? CURRENCIES.JPY;
+  return amount / Math.pow(10, config.decimals);
+}
+
+/**
+ * UI入力値(小数含む)を、DB保存用の整数(最小単位)に変換
+ * 例: USD, 9.99 -> 999
+ */
+export function convertAmountToMinorUnits(amount: number, currency: string): number {
+  const config = CURRENCIES[currency as CurrencyCode] ?? CURRENCIES.JPY;
+  return Math.round(amount * Math.pow(10, config.decimals));
+}
+
+/**
+ * 通貨を見やすくフォーマットする
+ * DBの整数値を受け取り、自動的に小数に戻してフォーマットします
+ */
+export function formatCurrency(amountFromDb: number, currency: string): string {
+  const actualAmount = convertAmountFromMinorUnits(amountFromDb, currency);
+  
   return new Intl.NumberFormat('ja-JP', {
     style: 'currency',
     currency: currency,
-    // JPYの場合は小数を表示しない、USD等は必要に応じて表示などの調整が自動で行われる
-  }).format(price);
+  }).format(actualAmount);
 }
 
 /**
  * 指定通貨での月額換算合計を計算
- * - 異なる通貨は計算対象外
- * - 年額は12で割り、切り上げ (予算オーバーを防ぐ安全策)
  */
 export function calculateMonthlyTotal(
   subscriptions: Subscription[], 
-  targetCurrency: string = CURRENCIES.JPY
+  targetCurrency: CurrencyCode = 'JPY'
 ): number {
   return subscriptions
     .filter(sub => sub.currency === targetCurrency)
     .reduce((acc, curr) => {
+      // 一度「実際の金額」に戻す
+      const actualPrice = convertAmountFromMinorUnits(curr.price, curr.currency);
+      
+      let monthlyPrice = actualPrice;
       if (curr.cycle === SUBSCRIPTION_CYCLES.yearly) {
-        return acc + Math.ceil(curr.price / 12);
+        // 年額は12で割る
+        monthlyPrice = actualPrice / 12;
       }
-      return acc + curr.price;
+      
+      return acc + monthlyPrice;
     }, 0);
 }
 ```
 
-**`lib/validations.ts`** (バリデーション定義)
+**`lib/validations.ts`**
+厳格化されたZodスキーマ定義です。
 
 ```typescript
 import { z } from 'zod';
-import { SUBSCRIPTION_CYCLES } from '@/lib/constants';
+import { SUBSCRIPTION_CYCLES, CURRENCIES } from '@/lib/constants';
 
 export const formSchema = z.object({
   name: z.string().min(1, 'サービス名は必須です'),
-  price: z.coerce.number().min(1, '金額を入力してください').nonnegative('マイナスの金額は入力できません'),
+  // UI上は小数を許容する
+  price: z.coerce.number()
+    .min(0.01, '金額を入力してください')
+    .nonnegative('マイナスの金額は入力できません'),
+  currency: z.enum([CURRENCIES.JPY.code, CURRENCIES.USD.code, CURRENCIES.EUR.code]),
   cycle: z.enum([SUBSCRIPTION_CYCLES.monthly, SUBSCRIPTION_CYCLES.yearly], {
     required_error: '支払いサイクルを選択してください',
   }),
   nextPayment: z.string().date().refine((val) => {
-    // 簡易チェック: 空文字でないこと。
-    // 厳密な未来日付チェックはタイムゾーン問題があるため、UIのmin属性に任せる
-    return val.length > 0;
-  }, '日付を入力してください'),
+    const date = new Date(val);
+    // 日付として無効、または極端な過去などを弾く
+    return !isNaN(date.getTime()) && date.getFullYear() > 2000;
+  }, '正しい日付を入力してください'),
   category: z.string().optional(),
 });
 
@@ -119,24 +151,30 @@ export type FormValues = z.infer<typeof formSchema>;
 
 -----
 
-#### 2\. データベース設定 (`db/`)
+### 2\. データベース設定 (`db/`)
 
-**`db/index.ts`** (シングルトン接続: 開発環境でのクラッシュ防止)
+**`db/index.ts`**
+環境変数チェックを追加したDB接続設定です。
 
 ```typescript
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
 
-const connectionString = process.env.DATABASE_URL!;
+// Fail Fast: 設定ミスを即座に検知
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is not set in environment variables');
+}
 
-// Next.jsのHot Reload対策: グローバルに接続をキャッシュ
+const connectionString = process.env.DATABASE_URL;
+
 const globalForDb = globalThis as unknown as {
   conn: postgres.Sql | undefined;
 };
 
+// 開発環境と本番環境でコネクション管理を切り分け
 const client = globalForDb.conn ?? postgres(connectionString, { 
-  max: 10, // 接続プールの上限設定
+  max: process.env.NODE_ENV === 'production' ? 10 : 1, 
 });
 
 if (process.env.NODE_ENV !== 'production') {
@@ -147,9 +185,10 @@ export const db = drizzle(client, { schema });
 ```
 
 **`db/schema.ts`**
+インデックスを追加し、金額を整数型で定義しています。
 
 ```typescript
-import { pgTable, text, integer, boolean, timestamp, uuid, date } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, boolean, timestamp, uuid, date, index } from 'drizzle-orm/pg-core';
 import { type InferSelectModel, type InferInsertModel } from 'drizzle-orm';
 import { SUBSCRIPTION_CYCLES, CURRENCIES } from '@/lib/constants';
 
@@ -158,8 +197,9 @@ export const subscriptions = pgTable('subscriptions', {
   userId: text('user_id').notNull(), // Auth ID
   
   name: text('name').notNull(),
-  price: integer('price').notNull(),
-  currency: text('currency').default(CURRENCIES.JPY).notNull(),
+  // integerだが、通貨の最小単位(cents/yen)で保存する
+  price: integer('price').notNull(), 
+  currency: text('currency').default(CURRENCIES.JPY.code).notNull(),
   
   cycle: text('cycle', { enum: [SUBSCRIPTION_CYCLES.monthly, SUBSCRIPTION_CYCLES.yearly] }).notNull(),
   nextPayment: date('next_payment').notNull(),
@@ -168,6 +208,11 @@ export const subscriptions = pgTable('subscriptions', {
   isActive: boolean('is_active').default(true).notNull(),
   
   createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => {
+  return {
+    // ユーザーIDでの検索を高速化
+    userIdIdx: index('user_id_idx').on(table.userId),
+  };
 });
 
 export type Subscription = InferSelectModel<typeof subscriptions>;
@@ -176,9 +221,9 @@ export type NewSubscription = InferInsertModel<typeof subscriptions>;
 
 -----
 
-#### 3\. サーバーアクション (`app/actions.ts`)
+### 3\. Server Actions (`app/actions.ts`)
 
-**`app/actions.ts`** (Auth抽象化とデータ隠蔽の実装)
+DB保存時の通貨変換処理を組み込んでいます。
 
 ```typescript
 'use server';
@@ -186,16 +231,15 @@ export type NewSubscription = InferInsertModel<typeof subscriptions>;
 import { db } from '@/db';
 import { subscriptions } from '@/db/schema';
 import { formSchema, type FormValues } from '@/lib/validations';
+import { convertAmountToMinorUnits } from '@/lib/utils';
 import { eq, desc, and } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 
-// --- 認証レイヤーの抽象化 ---
-// 将来 Auth.js や Clerk を導入する際は、この関数の中身だけを書き換えればOK
+// --- Auth Mock ---
 async function getCurrentUser() {
-  // TODO: Replace with actual auth logic, e.g., await auth();
   return { id: 'user_demo_123' };
 }
-// -------------------------
+// -----------------
 
 export type ActionResponse<T = null> = {
   success: boolean;
@@ -203,7 +247,7 @@ export type ActionResponse<T = null> = {
   error?: string;
 };
 
-// フロントエンドに公開して良いデータの型 (userIdなどの機密情報を除外)
+// フロントエンド公開用データ型
 type SubscriptionPublic = Omit<typeof subscriptions.$inferSelect, 'userId' | 'createdAt'>;
 
 export async function getSubscriptions(): Promise<ActionResponse<SubscriptionPublic[]>> {
@@ -213,7 +257,6 @@ export async function getSubscriptions(): Promise<ActionResponse<SubscriptionPub
     const data = await db.query.subscriptions.findMany({
       where: eq(subscriptions.userId, user.id),
       orderBy: [desc(subscriptions.nextPayment)],
-      // 必要なカラムのみを明示的に取得 (Data Masking)
       columns: {
         id: true,
         name: true,
@@ -232,7 +275,8 @@ export async function getSubscriptions(): Promise<ActionResponse<SubscriptionPub
   }
 }
 
-export async function addSubscription(data: FormValues): Promise<ActionResponse> {
+// path引数を追加して、どこから呼ばれても画面更新できるように変更
+export async function addSubscription(data: FormValues, path: string = '/'): Promise<ActionResponse> {
   const validated = formSchema.safeParse(data);
   if (!validated.success) {
     return { success: false, error: '入力内容に誤りがあります' };
@@ -241,12 +285,19 @@ export async function addSubscription(data: FormValues): Promise<ActionResponse>
   try {
     const user = await getCurrentUser();
     
+    // UIの数値(小数)をDB用整数に変換
+    const priceInMinorUnits = convertAmountToMinorUnits(
+      validated.data.price, 
+      validated.data.currency
+    );
+
     await db.insert(subscriptions).values({
       ...validated.data,
-      userId: user.id, // 取得したユーザーIDを使用
+      price: priceInMinorUnits,
+      userId: user.id,
     });
 
-    revalidatePath('/');
+    revalidatePath(path);
     return { success: true };
   } catch (error) {
     console.error('Failed to add subscription:', error);
@@ -254,7 +305,7 @@ export async function addSubscription(data: FormValues): Promise<ActionResponse>
   }
 }
 
-export async function deleteSubscription(id: string): Promise<ActionResponse> {
+export async function deleteSubscription(id: string, path: string = '/'): Promise<ActionResponse> {
   try {
     const user = await getCurrentUser();
 
@@ -262,7 +313,7 @@ export async function deleteSubscription(id: string): Promise<ActionResponse> {
       .where(
         and(
           eq(subscriptions.id, id),
-          eq(subscriptions.userId, user.id) // 所有権確認
+          eq(subscriptions.userId, user.id)
         )
       )
       .returning({ deletedId: subscriptions.id });
@@ -271,7 +322,7 @@ export async function deleteSubscription(id: string): Promise<ActionResponse> {
       return { success: false, error: '削除対象が見つからないか、権限がありません' };
     }
     
-    revalidatePath('/');
+    revalidatePath(path);
     return { success: true };
   } catch (error) {
     console.error('Failed to delete subscription:', error);
@@ -282,9 +333,10 @@ export async function deleteSubscription(id: string): Promise<ActionResponse> {
 
 -----
 
-#### 4\. UIコンポーネント (`app/_components/`)
+### 4\. UIコンポーネント (`app/_components/`)
 
 **`app/_components/add-subscription-button.tsx`**
+通貨選択機能を追加したモーダルフォームです。
 
 ```tsx
 'use client';
@@ -294,9 +346,10 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { formSchema, type FormValues } from '@/lib/validations';
 import { addSubscription } from '@/app/actions';
-import { SUBSCRIPTION_CYCLES, CYCLE_LABELS } from '@/lib/constants';
+import { SUBSCRIPTION_CYCLES, CYCLE_LABELS, CURRENCIES } from '@/lib/constants';
 import { getLocalTodayString } from '@/lib/utils';
 import { toast } from 'sonner';
+import { usePathname } from 'next/navigation';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -313,26 +366,36 @@ import { Plus, Loader2 } from 'lucide-react';
 
 export function AddSubscriptionButton() {
   const [open, setOpen] = useState(false);
+  const pathname = usePathname();
   
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: '',
       price: 0,
+      currency: CURRENCIES.JPY.code,
       cycle: SUBSCRIPTION_CYCLES.monthly,
       nextPayment: getLocalTodayString(),
+      category: 'general',
     },
   });
 
   const isSubmitting = form.formState.isSubmitting;
 
   async function onSubmit(values: FormValues) {
-    const res = await addSubscription(values);
+    const res = await addSubscription(values, pathname);
     
     if (res.success) {
       toast.success('サブスクリプションを追加しました');
       setOpen(false);
-      form.reset();
+      form.reset({
+        name: '',
+        price: 0,
+        currency: CURRENCIES.JPY.code,
+        cycle: SUBSCRIPTION_CYCLES.monthly,
+        nextPayment: getLocalTodayString(),
+        category: 'general',
+      });
     } else {
       toast.error(res.error || 'エラーが発生しました');
     }
@@ -343,35 +406,63 @@ export function AddSubscriptionButton() {
       <DialogTrigger asChild>
         <Button><Plus className="mr-2 h-4 w-4" /> 追加する</Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>サブスクを追加</DialogTitle>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+            
             <FormField
               control={form.control}
               name="name"
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>サービス名</FormLabel>
-                  <FormControl><Input placeholder="Netflix" {...field} /></FormControl>
+                  <FormControl><Input placeholder="Netflix, Spotify..." {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )}
             />
-            <div className="flex gap-4">
+
+            <div className="flex gap-3">
                 <FormField
                   control={form.control}
                   name="price"
                   render={({ field }) => (
                     <FormItem className="flex-1">
                       <FormLabel>金額</FormLabel>
-                      <FormControl><Input type="number" {...field} /></FormControl>
+                      <FormControl>
+                        <Input type="number" step="0.01" placeholder="0" {...field} />
+                      </FormControl>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
+
+                <FormField
+                  control={form.control}
+                  name="currency"
+                  render={({ field }) => (
+                    <FormItem className="w-24">
+                      <FormLabel>通貨</FormLabel>
+                      <Select onValueChange={field.onChange} defaultValue={field.value}>
+                        <FormControl>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {Object.values(CURRENCIES).map((currency) => (
+                            <SelectItem key={currency.code} value={currency.code}>
+                              {currency.code} ({currency.symbol})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
                 <FormField
                   control={form.control}
                   name="cycle"
@@ -395,6 +486,7 @@ export function AddSubscriptionButton() {
                   )}
                 />
             </div>
+
              <FormField
               control={form.control}
               name="nextPayment"
@@ -405,7 +497,6 @@ export function AddSubscriptionButton() {
                     <Input 
                       type="date" 
                       {...field} 
-                      // 過去の日付入力を防ぐ (UX向上)
                       min={getLocalTodayString()}
                     />
                   </FormControl>
@@ -413,6 +504,7 @@ export function AddSubscriptionButton() {
                 </FormItem>
               )}
             />
+
             <Button type="submit" className="w-full" disabled={isSubmitting}>
               {isSubmitting ? (
                 <>
@@ -432,11 +524,13 @@ export function AddSubscriptionButton() {
 ```
 
 **`app/_components/subscription-list.tsx`**
+`formatCurrency` を使用して、DBの値（整数）を正しい通貨表記で表示します。
 
 ```tsx
 'use client';
 
 import { useOptimistic, startTransition, useState } from 'react';
+import { usePathname } from 'next/navigation';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
@@ -451,10 +545,9 @@ import { toast } from 'sonner';
 
 import { type Subscription } from '@/db/schema';
 import { CYCLE_LABELS, SUBSCRIPTION_CYCLES } from '@/lib/constants';
-import { formatCurrency } from '@/lib/utils'; // 共通フォーマッター
+import { formatCurrency } from '@/lib/utils';
 import { deleteSubscription } from '@/app/actions';
 
-// 行コンポーネント
 function SubscriptionRow({ 
   sub, 
   onDeleteClick 
@@ -478,7 +571,7 @@ function SubscriptionRow({
           size="icon" 
           className="text-muted-foreground hover:text-destructive"
           onClick={() => onDeleteClick(sub.id, sub.name)}
-          aria-label={`${sub.name}を削除`} // アクセシビリティ対応
+          aria-label={`${sub.name}を削除`}
         >
           <Trash2 className="h-4 w-4" />
         </Button>
@@ -488,7 +581,7 @@ function SubscriptionRow({
 }
 
 export function SubscriptionList({ initialData }: { initialData: any[] }) {
-  // Optimistic UI
+  const pathname = usePathname();
   const [optimisticSubscriptions, mutateOptimisticSubscriptions] = useOptimistic(
     initialData,
     (state, idToDelete: string) => state.filter((sub) => sub.id !== idToDelete)
@@ -506,7 +599,7 @@ export function SubscriptionList({ initialData }: { initialData: any[] }) {
       mutateOptimisticSubscriptions(deleteTarget.id);
     });
 
-    const result = await deleteSubscription(deleteTarget.id);
+    const result = await deleteSubscription(deleteTarget.id, pathname);
 
     setIsDeleting(false);
     setDeleteTarget(null);
@@ -579,9 +672,9 @@ export function SubscriptionList({ initialData }: { initialData: any[] }) {
 
 -----
 
-#### 5\. ダッシュボード (`app/page.tsx`)
+### 5\. メインページ (`app/page.tsx`)
 
-**`app/page.tsx`**
+`calculateMonthlyTotal` を呼び出し、UI表示では `formatCurrency` を使うように変更済みです。
 
 ```tsx
 import { getSubscriptions } from './actions';
@@ -608,7 +701,8 @@ export default async function DashboardPage() {
     );
   }
 
-  // JPYのみを計算
+  // JPYのみを計算し、表示用合計金額を取得
+  // (utils側でDB値を実数に戻して計算しています)
   const totalMonthly = calculateMonthlyTotal(data, 'JPY');
 
   return (
@@ -625,10 +719,10 @@ export default async function DashboardPage() {
             <JapaneseYen className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            {/* 共通フォーマッターを利用 */}
+            {/* 合計値をJPY形式でフォーマット */}
             <div className="text-2xl font-bold">{formatCurrency(totalMonthly, 'JPY')}</div>
             <p className="text-xs text-muted-foreground mt-1">
-              ※年額プランは月割り(切り上げ) / 外貨建ては除外
+              ※年額プランは月割り計算 / 外貨建ては現在集計対象外
             </p>
           </CardContent>
         </Card>
