@@ -5,20 +5,19 @@
 
 ```text
 app/
- ├── actions.ts                  # Server Actions (DB操作・認証・検証)
- ├── page.tsx                    # ダッシュボード画面 (Server Component)
- └── _components/
-      ├── add-subscription-button.tsx  # 追加モーダル (Client Component / Toast対応)
-      └── subscription-list.tsx        # 一覧リスト (Client Component / Optimistic UI対応)
+ ├── actions.ts                  # Server Actions (DB操作・認証・検証・Revalidation)
+ ├── page.tsx                    # メイン画面 (Server Component / データ集計)
+ └── _components/                # プレゼンテーション層
+      ├── add-subscription-button.tsx  # 追加モーダル (Client / Form Control)
+      └── subscription-list.tsx        # 一覧リスト (Client / Optimistic UI / 削除確認)
 db/
- ├── index.ts                    # DB接続設定
- └── schema.ts                   # Drizzleスキーマ & 型定義 (定数利用)
+ ├── index.ts                    # DB接続クライアント (Singleton / Env Check)
+ └── schema.ts                   # Drizzleスキーマ & 型定義 (Single Source of Truth)
 lib/
- ├── constants.ts                # 定数定義 (New)
- ├── utils.ts                    # ユーティリティ & 計算ロジック
- └── validations.ts              # Zodバリデーション (Renamed from schema.ts)
+ ├── constants.ts                # 定数定義 (Currency, Cycle, Labels)
+ ├── utils.ts                    # 純粋関数 (通貨変換, 日付計算, Class Merge)
+ └── validations.ts              # Zodスキーマ (Form Validation)
 ```
-
 -----
 
 ### 1\. ユーティリティ & 定数 (`lib/`)
