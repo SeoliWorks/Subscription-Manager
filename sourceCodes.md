@@ -2,22 +2,25 @@
 -----
 
 ### ディレクトリ構造 (最終版)
+### 3.1 ディレクトリ構造 (v1.0)
 
 ```text
 app/
- ├── actions.ts                  # Server Actions (DB操作・認証・検証・Revalidation)
- ├── page.tsx                    # メイン画面 (Server Component / データ集計)
+ ├── actions.ts                  # Server Actions (DB操作・認証・検証・セキュリティ対策済)
+ ├── loading.tsx                 # Loading UI (Skeleton / Suspense fallback)
+ ├── page.tsx                    # メイン画面 (Server Component / 多通貨集計)
  └── _components/                # プレゼンテーション層
-      ├── add-subscription-button.tsx  # 追加モーダル (Client / Form Control)
-      └── subscription-list.tsx        # 一覧リスト (Client / Optimistic UI / 削除確認)
+      ├── add-subscription-button.tsx  # 追加モーダル (Client / Safe Date Init)
+      └── subscription-list.tsx        # 一覧リスト (Client / Typed Optimistic UI)
 db/
  ├── index.ts                    # DB接続クライアント (Singleton / Env Check)
- └── schema.ts                   # Drizzleスキーマ & 型定義 (Single Source of Truth)
+ └── schema.ts                   # Drizzleスキーマ & 型定義
 lib/
  ├── constants.ts                # 定数定義 (Currency, Cycle, Labels)
- ├── utils.ts                    # 純粋関数 (通貨変換, 日付計算, Class Merge)
+ ├── utils.ts                    # 純粋関数 (集計ロジック, 通貨変換, 日付計算)
  └── validations.ts              # Zodスキーマ (Form Validation)
 ```
+
 -----
 
 ### 1\. ユーティリティ & 定数 (`lib/`)
