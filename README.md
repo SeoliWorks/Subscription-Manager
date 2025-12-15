@@ -7,19 +7,21 @@
 
   * **名称:** Subscription Manager
   * **目的:** 散らばりがちなサブスクリプション契約を一元管理し、固定費を可視化する。
+  * **バージョン:** 1.0
   * **特徴:**
       * **APIレス:** Next.js Server Actionsによる直接的なデータ操作。
-      * **型安全:** DBスキーマからフロントエンドまで一貫した型定義 (End-to-End Type Safety)。
-      * **高速UX:** Optimistic UI（楽観的更新）によるゼロレイテンシーな操作感。
+      * **End-to-End Type Safety:** DBからフロントエンドまで完全な型安全性を提供。
+      * **Multi-currency Support:** JPY, USD, EUR の個別集計と表示に対応。
+      * **Robust UX:** Optimistic UI、Suspense Loading、およびタイムゾーンを考慮した日付管理。
 
 ## 2\. 技術スタック (Tech Stack)
 
 | カテゴリ | 技術選定 | 役割 | 備考 |
 | :--- | :--- | :--- | :--- |
-| **Framework** | **Next.js 15 (App Router)** | フルスタックFW | Server Actions / UseOptimistic |
+| **Framework** | **Next.js 15 (App Router)** | フルスタックFW | Server Actions / Suspense / Optimistic UI |
 | **Language** | **TypeScript** | 言語 | Strict Mode |
 | **Styling** | **Tailwind CSS** | スタイリング | |
-| **UI Library** | **shadcn/ui** | コンポーネント | Dialog, Table, Alert Dialog, Select |
+| **UI Library** | **shadcn/ui** | コンポーネント | Dialog, Table, Alert Dialog, Select, Skeleton |
 | **Feedback** | **Sonner** | 通知 (Toast) | ノンブロッキングなUX |
 | **Database** | **PostgreSQL** | RDB | `postgres` (client) |
 | **ORM** | **Drizzle ORM** | DB操作 | `drizzle-kit` によるマイグレーション |
@@ -31,115 +33,93 @@
 
 ```text
 app/
- ├── actions.ts                  # Server Actions (DB操作・認証・検証・Revalidation)
- ├── page.tsx                    # メイン画面 (Server Component / データ集計)
+ ├── actions.ts                  # Server Actions (DB操作・認証・検証・セキュリティ対策済)
+ ├── loading.tsx                 # Loading UI (Skeleton / Suspense fallback)
+ ├── page.tsx                    # メイン画面 (Server Component / 多通貨集計)
  └── _components/                # プレゼンテーション層
-      ├── add-subscription-button.tsx  # 追加モーダル (Client / Form Control)
-      └── subscription-list.tsx        # 一覧リスト (Client / Optimistic UI / 削除確認)
+      ├── add-subscription-button.tsx  # 追加モーダル (Client / Safe Date Init)
+      └── subscription-list.tsx        # 一覧リスト (Client / Typed Optimistic UI)
 db/
  ├── index.ts                    # DB接続クライアント (Singleton / Env Check)
- └── schema.ts                   # Drizzleスキーマ & 型定義 (Single Source of Truth)
+ └── schema.ts                   # Drizzleスキーマ & 型定義
 lib/
  ├── constants.ts                # 定数定義 (Currency, Cycle, Labels)
- ├── utils.ts                    # 純粋関数 (通貨変換, 日付計算, Class Merge)
+ ├── utils.ts                    # 純粋関数 (集計ロジック, 通貨変換, 日付計算)
  └── validations.ts              # Zodスキーマ (Form Validation)
 ```
 
-### 3.2 データフロー (Optimistic UI)
+### 3.2 データフロー & セキュリティ
 
-ユーザーの操作感を最優先するため、\*\*「サーバーの完了を待たずに画面を更新する」\*\*フローを採用しています。
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant UI (Client)
-    participant Action (Server)
-    participant DB
-
-    Note over User, DB: 削除フロー (Optimistic Update)
-    User->>UI (Client): 削除確認ダイアログ -> 「削除」
-    UI (Client)->>UI (Client): 【即時反映】リストから該当行を消去
-    UI (Client)->>Action (Server): deleteSubscription(id, path)実行
-    
-    rect rgb(240, 240, 240)
-        Note right of UI (Client): バックグラウンド処理
-        Action (Server)->>Action (Server): ユーザー所有権チェック
-        Action (Server)->>DB: DELETE実行
-        DB-->>Action (Server): 完了
-        Action (Server)->>Action (Server): revalidatePath()
-        Action (Server)-->>UI (Client): 成功レスポンス
-    end
-
-    UI (Client)->>User: Toast通知「削除しました」
-```
+  * **Server Actions:**
+      * クライアントから `path` 引数を受け取る設計を廃止。
+      * サーバー内部で `revalidatePath('/')` を固定実行し、意図しないキャッシュパージを防ぐ。
+  * **Optimistic UI:**
+      * `useOptimistic` を使用し、サーバー応答を待たずにリストを即時更新。
+      * 失敗時はToast通知と共に自動的にロールバック（Reactの標準挙動）。
 
 ## 4\. データベース設計
 
 **テーブル名:** `subscriptions`
 
-マジックナンバーや文字列のハードコーディングを防ぐため、アプリ側の `constants.ts` と連携した定義を行います。
-
-| カラム名 | 型 | 制約/Default | 定数参照 | 説明 |
-| :--- | :--- | :--- | :--- | :--- |
-| `id` | UUID | PK, Default Random | - | - |
-| `user_id` | Text | Not Null | - | 所有者ID (Indexあり) |
-| `name` | Text | Not Null | - | サービス名 |
-| `price` | Integer | Not Null | - | **通貨の最小単位** (例: 100円=100, $10.99=1099) |
-| `currency` | Text | Default: 'JPY' | `CURRENCIES` | 通貨コード (JPY, USD, EUR) |
-| `cycle` | Text | Not Null | `SUBSCRIPTION_CYCLES` | `monthly` / `yearly` |
-| `next_payment` | Date | Not Null | - | YYYY-MM-DD |
-| `category` | Text | Default: 'general' | - | カテゴリ分類 (Optional) |
-| `is_active` | Boolean | Default: true | - | 有効/無効フラグ |
-| `created_at` | Timestamp | Default Now | - | - |
+| カラム名 | 型 | 制約/Default | 説明 |
+| :--- | :--- | :--- | :--- |
+| `id` | UUID | PK, Default Random | - |
+| `user_id` | Text | Not Null | 所有者ID (Indexあり) |
+| `name` | Text | Not Null | サービス名 |
+| `price` | Integer | Not Null | **通貨の最小単位** (例: 100円=100, $10.99=1099) |
+| `currency` | Text | Default: 'JPY' | `JPY`, `USD`, `EUR` (拡張可能) |
+| `cycle` | Text | Not Null | `monthly` / `yearly` |
+| `next_payment` | Date | Not Null | YYYY-MM-DD |
+| `category` | Text | Default: 'general' | - |
+| `is_active` | Boolean | Default: true | - |
+| `created_at` | Timestamp | Default Now | - |
 
 ## 5\. ロジック & ビジネスルール
 
 ### 5.1 通貨・金額計算 (Minor Units Handling)
 
-浮動小数点誤差を防ぐため、金額は「最小通貨単位（Minor Units）」の整数としてDBに保存します。
+1.  **DB保存 (Write):**
+      * 入力値（例: `10.50` USD）を `decimals` に基づき整数化 (`1050`) して保存。
+2.  **集計 (Aggregation):**
+      * `calculateMonthlyAggregations` 関数により、通貨ごとに個別に集計。
+      * 戻り値: `{ JPY: 5000, USD: 20.50, EUR: 0 }` (実数)
+3.  **表示 (Read):**
+      * **DB値の表示:** `formatCurrency` (DB整数 -\> 表示文字列)
+      * **集計値の表示:** `formatDisplayPrice` (実数 -\> 表示文字列)
+      * ※計算結果を再変換しないよう厳密に関数を分離。
 
-  * **DB保存 (Write):**
-      * UI入力値（例: `9.99` USD）を `constants.ts` の `decimals` 設定に基づき変換。
-      * 計算式: `Input * (10 ^ decimals)` -\> `999`
-  * **UI表示 (Read):**
-      * DB値（例: `999`）を元の単位に戻して表示。
-      * 計算式: `DBValue / (10 ^ decimals)` -\> `9.99`
-  * **月額固定費の算出:**
-      * `cycle === 'yearly'` の場合、実数に戻した金額を `12` で除算して合算する。
-      * 現在は `JPY` のみ集計対象とする。
+### 5.2 日付管理 (Timezone Safe)
 
-### 5.2 日付管理 (Timezone Handling)
+  * **サーバーサイド (SSR):** タイムゾーン依存のリスクがあるため、現在時刻によるデフォルト値生成を行わない。
+  * **クライアントサイド (CSR):** `add-subscription-button.tsx` 内で `getLocalTodayString()` を使用し、ユーザーのブラウザロケールに基づいた「今日」を初期値として設定。
+  * **Hydration Mismatch対策:** 日付生成ロジックを分離し、サーバー/クライアント間の不整合を防ぐ。
 
-  * **課題:** `new Date()` (UTC) による日付ズレ。
-  * **解決策:** `lib/utils.ts` の `getLocalTodayString()` を使用し、ブラウザ（ローカル環境）基準の `YYYY-MM-DD` 文字列を初期値として提供する。
+### 5.3 バリデーション
 
-### 5.3 バリデーション (Validation)
+  * **型安全性:** `SubscriptionPublic` 型を定義・エクスポートし、フロントエンドコンポーネントで `any` の使用を禁止。
+  * **入力制限:**
+      * Price: 0.01以上。
+      * Date: 2000年以降かつ、無効な日付文字列を拒否。
 
-`lib/validations.ts` のZodスキーマにより、以下のルールを強制する。
+## 6\. セキュリティ設計 (Updated)
 
-  * **Price:** 0.01以上の数値（マイナス不可）。
-  * **Currency:** 定義済み通貨コード (`JPY`, `USD`, `EUR`) のみ。
-  * **Next Payment:** `Date` として有効かつ、2000年以降の日付であること。
-
-## 6\. セキュリティ設計
-
-Server Actionsは公開APIエンドポイントと同等であるため、以下の対策を実装済み。
-
-  * **所有者検証 (Ownership Verification):**
-      * `getCurrentUser()` (Mock/Auth) から取得したIDを使用。
-      * DELETE操作では `WHERE id = ? AND user_id = ?` を強制し、他人のデータを削除できないように制御。
+  * **所有者検証:**
+      * 全ての CRUD 操作において `WHERE user_id = current_user.id` を強制。
+  * **Revalidation保護:**
+      * `revalidatePath` の引数をサーバー側で固定化。
   * **Fail Fast:**
-      * DB接続設定 (`db/index.ts`) にて、環境変数 `DATABASE_URL` が欠落している場合は即座に例外をスローし、起動させない。
+      * 環境変数 (`DATABASE_URL`) 未設定時は起動時にクラッシュさせ、設定ミスを即座に検知。
 
 ## 7\. 今後の拡張ロードマップ
 
-実装完了済みの基盤により、以下の拡張が可能です。
+基盤修正により、以下の機能拡張が容易になっています。
 
 1.  **認証機能の完全統合 (Clerk / Auth.js)**
-      * `actions.ts` 内の `getCurrentUser` モック関数を差し替えるのみ。
-2.  **多通貨集計 (Multi-currency Aggregation)**
-      * 現在はJPYのみを集計しているが、為替レートAPIを導入し、`calculateMonthlyTotal` 関数内で動的にレート換算を行うことで全通貨の合算が可能。
-3.  **カテゴリ管理機能**
-      * DBカラム `category` は実装済み。UIにフィルタリング機能を追加可能。
+      * `actions.ts` の `getCurrentUser` モックを差し替えるのみで完了。
+2.  **為替レート連携**
+      * 現在は通貨ごとの小計表示（`USD: $20.00`）まで実装済み。
+      * 外部API (Exchange Rate API) を導入すれば、`calculateMonthlyAggregations` 内で円換算総額を算出可能。
+3.  **カテゴリ別チャート**
+      * データ構造は整っているため、`recharts` 等を導入して `category` ごとの円グラフ描画が可能。
 
 -----
