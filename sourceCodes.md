@@ -3,8 +3,6 @@
 
 ### ディレクトリ構造 (最終版)
 
-`app/_components/delete-button.tsx` は `subscription-list.tsx` に機能統合したため削除しました。
-
 ```text
 app/
  ├── actions.ts                  # Server Actions (DB操作・認証・検証)
