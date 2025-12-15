@@ -1,57 +1,128 @@
+▶これまでの3回にわたるレビューと改善（リファクタリング）を反映した、\*\*「Subscription Manager (最終完成版)」\*\*の全ソースコードです。
+省略箇所はなく、そのままコピー＆ペーストして動作するように構成しています。
 
-### ディレクトリ構造
+特に以下の点が初期コードから変更・強化されています。
+
+1.  **堅牢性:** DBスキーマからの型推論と、定数（Enum）による管理。
+2.  **セキュリティ:** 削除・追加時の厳格な所有者チェック。
+3.  **UX:** `useOptimistic` による即時削除反映と、Toast通知。
+4.  **保守性:** ビジネスロジックと日付処理の分離。
+
+-----
+
+### ディレクトリ構造 (最終版)
+
+`app/_components/delete-button.tsx` は `subscription-list.tsx` に機能統合したため削除しました。
 
 ```text
 app/
- ├── actions.ts           # Server Actions (DB操作ロジック)
- ├── page.tsx             # メイン画面 (Server Component / データ取得)
- └── _components/         # 画面固有のUIパーツ
-      ├── add-button.tsx  # 追加モーダル (Client Component)
-      ├── sub-list.tsx    # 一覧表示テーブル
-      └── del-button.tsx  # 削除アラート (Client Component)
+ ├── actions.ts                  # Server Actions (DB操作・認証・検証)
+ ├── page.tsx                    # ダッシュボード画面 (Server Component)
+ └── _components/
+      ├── add-subscription-button.tsx  # 追加モーダル (Client Component / Toast対応)
+      └── subscription-list.tsx        # 一覧リスト (Client Component / Optimistic UI対応)
 db/
- ├── schema.ts            # Drizzleスキーマ定義
- └── index.ts             # DB接続設定
+ ├── index.ts                    # DB接続設定
+ └── schema.ts                   # Drizzleスキーマ & 型定義 (定数利用)
 lib/
- └── schema.ts            # Zodバリデーション定義 (共通)
+ ├── constants.ts                # 定数定義 (New)
+ ├── utils.ts                    # ユーティリティ & 計算ロジック
+ └── validations.ts              # Zodバリデーション (Renamed from schema.ts)
 ```
 
 -----
 
-### 事前準備 (Environment & Dependencies)
+### 1\. 設定・ユーティリティ・定義 (Config & Libs)
 
-`.env` ファイルにデータベース接続文字列が必要です。
+**`lib/constants.ts`** (新規作成: 定数管理)
 
-```env
-DATABASE_URL="postgresql://user:password@host:port/dbname"
+```typescript
+export const SUBSCRIPTION_CYCLES = {
+  monthly: 'monthly',
+  yearly: 'yearly',
+} as const;
+
+export const CYCLE_LABELS = {
+  [SUBSCRIPTION_CYCLES.monthly]: '月額',
+  [SUBSCRIPTION_CYCLES.yearly]: '年額',
+};
+
+export const CURRENCIES = {
+  JPY: 'JPY',
+  USD: 'USD',
+  EUR: 'EUR',
+} as const;
 ```
 
-### 1\. ユーティリティ & 設定
-
-**`lib/utils.ts`** (Shadcn UIの標準ユーティリティ)
+**`lib/utils.ts`** (計算ロジックと日付処理を追加)
 
 ```typescript
 import { type ClassValue, clsx } from "clsx"
 import { twMerge } from "tailwind-merge"
+import { type Subscription } from "@/db/schema"
+import { SUBSCRIPTION_CYCLES } from "./constants"
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
+
+// 日本時間などを考慮して、ブラウザのローカル日付(YYYY-MM-DD)を取得
+export function getLocalTodayString(): string {
+  const local = new Date();
+  const offset = local.getTimezoneOffset();
+  const adjustedDate = new Date(local.getTime() - (offset * 60 * 1000));
+  return adjustedDate.toISOString().split('T')[0];
+}
+
+// ビジネスロジック: 月額換算の合計値を計算
+export function calculateMonthlyTotal(subscriptions: Subscription[]): number {
+  return subscriptions.reduce((acc, curr) => {
+    // 将来的に isActive チェックを入れる場合はここに追加
+    if (curr.cycle === SUBSCRIPTION_CYCLES.yearly) {
+      // 年額の場合は12で割り、四捨五入
+      return acc + Math.round(curr.price / 12);
+    }
+    return acc + curr.price;
+  }, 0);
+}
 ```
 
-**`db/schema.ts`** (データベース定義)
+**`lib/validations.ts`** (旧 `lib/schema.ts` からリネーム)
+
+```typescript
+import { z } from 'zod';
+import { SUBSCRIPTION_CYCLES } from '@/lib/constants';
+
+export const formSchema = z.object({
+  name: z.string().min(1, 'サービス名は必須です'),
+  price: z.coerce.number().min(1, '金額を入力してください'),
+  cycle: z.enum([SUBSCRIPTION_CYCLES.monthly, SUBSCRIPTION_CYCLES.yearly], {
+    required_error: '支払いサイクルを選択してください',
+  }),
+  nextPayment: z.string().date(), // YYYY-MM-DD形式のバリデーション
+  category: z.string().optional(),
+});
+
+export type FormValues = z.infer<typeof formSchema>;
+```
+
+**`db/schema.ts`** (定数利用と型推論)
 
 ```typescript
 import { pgTable, text, integer, boolean, timestamp, uuid, date } from 'drizzle-orm/pg-core';
+import { type InferSelectModel, type InferInsertModel } from 'drizzle-orm';
+import { SUBSCRIPTION_CYCLES, CURRENCIES } from '@/lib/constants';
 
 export const subscriptions = pgTable('subscriptions', {
   id: uuid('id').defaultRandom().primaryKey(),
-  userId: text('user_id').notNull(), // 今回はデモ用IDを使用
+  userId: text('user_id').notNull(),
   
   name: text('name').notNull(),
   price: integer('price').notNull(),
-  currency: text('currency').default('JPY').notNull(),
-  cycle: text('cycle', { enum: ['monthly', 'yearly'] }).notNull(),
+  // 通貨デフォルトを定数から設定
+  currency: text('currency').default(CURRENCIES.JPY).notNull(),
+  // Enumを定数から生成
+  cycle: text('cycle', { enum: [SUBSCRIPTION_CYCLES.monthly, SUBSCRIPTION_CYCLES.yearly] }).notNull(),
   nextPayment: date('next_payment').notNull(),
   
   category: text('category').default('general'),
@@ -59,59 +130,43 @@ export const subscriptions = pgTable('subscriptions', {
   
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
+
+// アプリケーション全体で使用する型定義
+export type Subscription = InferSelectModel<typeof subscriptions>;
+export type NewSubscription = InferInsertModel<typeof subscriptions>;
 ```
 
-**`db/index.ts`** (データベース接続)
+**`db/index.ts`** (変更なし)
 
 ```typescript
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema';
 
-// 環境変数が読み込まれていることを確認してください
 const connectionString = process.env.DATABASE_URL!;
 const client = postgres(connectionString);
 
 export const db = drizzle(client, { schema });
 ```
 
-**`lib/schema.ts`** (バリデーション定義)
-
-```typescript
-import { z } from 'zod';
-
-export const formSchema = z.object({
-  name: z.string().min(1, 'サービス名は必須です'),
-  price: z.coerce.number().min(1, '金額を入力してください'),
-  cycle: z.enum(['monthly', 'yearly'], {
-    required_error: '支払いサイクルを選択してください',
-  }),
-  nextPayment: z.string().date(), // YYYY-MM-DD形式
-  category: z.string().optional(),
-});
-
-export type FormValues = z.infer<typeof formSchema>;
-```
-
 -----
 
 ### 2\. バックエンドロジック (Server Actions)
 
-**`app/actions.ts`**
+**`app/actions.ts`** (セキュリティ強化済み)
 
 ```typescript
 'use server';
 
 import { db } from '@/db';
 import { subscriptions } from '@/db/schema';
-import { formSchema, FormValues } from '@/lib/schema';
-import { eq, desc } from 'drizzle-orm';
+import { formSchema, type FormValues } from '@/lib/validations';
+import { eq, desc, and } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 
-// デモ用の固定ユーザーID。認証導入後は session.user.id に置き換えます。
+// デモ用の固定ユーザーID
 const DEMO_USER_ID = 'user_demo_123'; 
 
-// 一覧取得
 export async function getSubscriptions() {
   try {
     const data = await db.query.subscriptions.findMany({
@@ -125,7 +180,6 @@ export async function getSubscriptions() {
   }
 }
 
-// 追加
 export async function addSubscription(data: FormValues) {
   // 1. バリデーション
   const validated = formSchema.safeParse(data);
@@ -134,7 +188,7 @@ export async function addSubscription(data: FormValues) {
   }
 
   try {
-    // 2. 保存
+    // 2. 保存 (ユーザーIDを付与)
     await db.insert(subscriptions).values({
       ...validated.data,
       userId: DEMO_USER_ID,
@@ -149,12 +203,16 @@ export async function addSubscription(data: FormValues) {
   }
 }
 
-// 削除
 export async function deleteSubscription(id: string) {
   try {
+    // セキュリティ対策: IDだけでなくユーザーIDも一致することを確認
     await db.delete(subscriptions)
-      .where(eq(subscriptions.id, id)); 
-      // 本番環境では AND eq(subscriptions.userId, currentUserId) も追加してください
+      .where(
+        and(
+          eq(subscriptions.id, id),
+          eq(subscriptions.userId, DEMO_USER_ID)
+        )
+      );
     
     revalidatePath('/');
     return { success: true };
@@ -169,83 +227,7 @@ export async function deleteSubscription(id: string) {
 
 ### 3\. フロントエンド UI コンポーネント
 
-**`app/_components/delete-button.tsx`** (削除ボタン)
-
-```tsx
-'use client';
-
-import { useState, useTransition } from 'react';
-import { Trash2 } from 'lucide-react';
-import { deleteSubscription } from '@/app/actions';
-
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
-import { Button } from '@/components/ui/button';
-
-interface DeleteButtonProps {
-  id: string;
-  name: string;
-}
-
-export function DeleteButton({ id, name }: DeleteButtonProps) {
-  const [isPending, startTransition] = useTransition();
-  const [open, setOpen] = useState(false);
-
-  const handleDelete = () => {
-    startTransition(async () => {
-      const result = await deleteSubscription(id);
-      if (result.success) {
-        setOpen(false);
-      } else {
-        alert('削除に失敗しました');
-      }
-    });
-  };
-
-  return (
-    <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger asChild>
-        <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-destructive">
-          <Trash2 className="h-4 w-4" />
-        </Button>
-      </AlertDialogTrigger>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>本当に削除しますか？</AlertDialogTitle>
-          <AlertDialogDescription>
-            「{name}」のデータを完全に削除します。<br />
-            この操作は取り消せません。
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={isPending}>キャンセル</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={(e) => {
-              e.preventDefault();
-              handleDelete();
-            }}
-            disabled={isPending}
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-          >
-            {isPending ? '削除中...' : '削除する'}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-```
-
-**`app/_components/add-subscription-button.tsx`** (追加ボタン & モーダル)
+**`app/_components/add-subscription-button.tsx`** (Toast & 定数対応)
 
 ```tsx
 'use client';
@@ -253,8 +235,11 @@ export function DeleteButton({ id, name }: DeleteButtonProps) {
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { formSchema, FormValues } from '@/lib/schema';
+import { formSchema, type FormValues } from '@/lib/validations';
 import { addSubscription } from '@/app/actions';
+import { SUBSCRIPTION_CYCLES, CYCLE_LABELS } from '@/lib/constants';
+import { getLocalTodayString } from '@/lib/utils';
+import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -277,18 +262,20 @@ export function AddSubscriptionButton() {
     defaultValues: {
       name: '',
       price: 0,
-      cycle: 'monthly',
-      nextPayment: new Date().toISOString().split('T')[0],
+      cycle: SUBSCRIPTION_CYCLES.monthly,
+      // タイムゾーンを考慮した今日の日付を初期値にする
+      nextPayment: getLocalTodayString(),
     },
   });
 
   async function onSubmit(values: FormValues) {
     const res = await addSubscription(values);
     if (res.success) {
+      toast.success('サブスクリプションを追加しました');
       setOpen(false);
       form.reset();
     } else {
-      alert('エラーが発生しました');
+      toast.error(res.error || 'エラーが発生しました');
     }
   }
 
@@ -337,8 +324,11 @@ export function AddSubscriptionButton() {
                           <SelectTrigger><SelectValue /></SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="monthly">月額</SelectItem>
-                          <SelectItem value="yearly">年額</SelectItem>
+                          {Object.entries(CYCLE_LABELS).map(([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                       <FormMessage />
@@ -366,33 +356,94 @@ export function AddSubscriptionButton() {
 }
 ```
 
-**`app/_components/subscription-list.tsx`** (一覧リスト)
+**`app/_components/subscription-list.tsx`** (Optimistic UI & 統合された削除機能)
 
 ```tsx
+'use client';
+
+import { useOptimistic, startTransition } from 'react';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { DeleteButton } from './delete-button';
+import { Button } from '@/components/ui/button';
+import { Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
 
-// 本来はDrizzleのInferSelectModelを使うのがベストですが、簡易定義
-type Subscription = {
-  id: string;
-  name: string;
-  price: number;
-  cycle: 'monthly' | 'yearly' | string;
-  nextPayment: string;
-  category: string | null;
-  isActive: boolean;
-};
+import { type Subscription } from '@/db/schema';
+import { CYCLE_LABELS, SUBSCRIPTION_CYCLES } from '@/lib/constants';
+import { deleteSubscription } from '@/app/actions';
+
+// 行コンポーネント (削除ロジックの呼び出しを担当)
+function SubscriptionRow({ 
+  sub, 
+  onDelete 
+}: { 
+  sub: Subscription, 
+  onDelete: (id: string, name: string) => void 
+}) {
+  // 通貨フォーマッター
+  const formatPrice = (price: number, currency: string) => {
+    return new Intl.NumberFormat('ja-JP', {
+      style: 'currency',
+      currency: currency,
+    }).format(price);
+  };
+
+  return (
+    <TableRow>
+      <TableCell className="font-medium">{sub.name}</TableCell>
+      <TableCell>{formatPrice(sub.price, sub.currency)}</TableCell>
+      <TableCell>
+        <Badge variant={sub.cycle === SUBSCRIPTION_CYCLES.monthly ? 'secondary' : 'outline'}>
+          {CYCLE_LABELS[sub.cycle as keyof typeof CYCLE_LABELS]}
+        </Badge>
+      </TableCell>
+      <TableCell>{sub.nextPayment}</TableCell>
+      <TableCell className="text-right">
+        <Button 
+          variant="ghost" 
+          size="icon" 
+          className="text-muted-foreground hover:text-destructive"
+          onClick={() => onDelete(sub.id, sub.name)}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </TableCell>
+    </TableRow>
+  );
+}
 
 export function SubscriptionList({ initialData }: { initialData: Subscription[] }) {
-  if (initialData.length === 0) {
+  // Optimistic State: サーバー応答を待たずにUIから要素を消すためのフック
+  const [optimisticSubscriptions, mutateOptimisticSubscriptions] = useOptimistic(
+    initialData,
+    (state, idToDelete: string) => {
+      return state.filter((sub) => sub.id !== idToDelete);
+    }
+  );
+
+  const handleDelete = async (id: string, name: string) => {
+    const isConfirmed = confirm(`「${name}」を削除しますか？`);
+    if (!isConfirmed) return;
+
+    // 1. 即座にUIから削除 (楽観的更新)
+    startTransition(() => {
+      mutateOptimisticSubscriptions(id);
+    });
+
+    // 2. サーバーで削除実行
+    const result = await deleteSubscription(id);
+
+    if (result.success) {
+      toast.success('削除しました');
+    } else {
+      toast.error('削除に失敗しました');
+      // 失敗した場合、Next.jsの自動再検証によりデータは復元されますが、通知は必要です
+    }
+  };
+
+  if (optimisticSubscriptions.length === 0) {
     return (
       <div className="text-center py-10 text-muted-foreground">
         登録されているサブスクリプションはありません。
@@ -412,20 +463,12 @@ export function SubscriptionList({ initialData }: { initialData: Subscription[] 
         </TableRow>
       </TableHeader>
       <TableBody>
-        {initialData.map((sub) => (
-          <TableRow key={sub.id}>
-            <TableCell className="font-medium">{sub.name}</TableCell>
-            <TableCell>¥{sub.price.toLocaleString()}</TableCell>
-            <TableCell>
-              <Badge variant={sub.cycle === 'monthly' ? 'secondary' : 'outline'}>
-                {sub.cycle === 'monthly' ? '月額' : '年額'}
-              </Badge>
-            </TableCell>
-            <TableCell>{sub.nextPayment}</TableCell>
-            <TableCell className="text-right">
-              <DeleteButton id={sub.id} name={sub.name} />
-            </TableCell>
-          </TableRow>
+        {optimisticSubscriptions.map((sub) => (
+          <SubscriptionRow 
+            key={sub.id} 
+            sub={sub} 
+            onDelete={handleDelete} 
+          />
         ))}
       </TableBody>
     </Table>
@@ -435,9 +478,9 @@ export function SubscriptionList({ initialData }: { initialData: Subscription[] 
 
 -----
 
-### 4\. メインページ
+### 4\. メインページ (Dashboard)
 
-**`app/page.tsx`**
+**`app/page.tsx`** (ロジック分離済み)
 
 ```tsx
 import { getSubscriptions } from './actions';
@@ -445,14 +488,13 @@ import { SubscriptionList } from './_components/subscription-list';
 import { AddSubscriptionButton } from './_components/add-subscription-button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { JapaneseYen, CreditCard } from 'lucide-react';
+import { calculateMonthlyTotal } from '@/lib/utils';
 
 export default async function DashboardPage() {
   const data = await getSubscriptions();
 
-  // 簡易計算: 月額のものだけを合計
-  const totalMonthly = data
-    .filter((sub) => sub.cycle === 'monthly')
-    .reduce((acc, curr) => acc + curr.price, 0);
+  // ユーティリティを使用して計算 (年額は月割り)
+  const totalMonthly = calculateMonthlyTotal(data);
 
   return (
     <div className="container mx-auto py-10 space-y-8">
@@ -461,15 +503,17 @@ export default async function DashboardPage() {
         <AddSubscriptionButton />
       </div>
 
-      {/* KPI エリア */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">月額固定費</CardTitle>
+            <CardTitle className="text-sm font-medium">月額固定費 (概算)</CardTitle>
             <JapaneseYen className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">¥{totalMonthly.toLocaleString()}</div>
+            <p className="text-xs text-muted-foreground mt-1">
+              ※年額プランは月割りで計算
+            </p>
           </CardContent>
         </Card>
         <Card>
@@ -483,7 +527,6 @@ export default async function DashboardPage() {
         </Card>
       </div>
 
-      {/* リスト表示エリア */}
       <Card>
         <CardHeader>
           <CardTitle>契約中サービス一覧</CardTitle>
