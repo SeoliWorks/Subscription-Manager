@@ -8,6 +8,7 @@
 ## First use:
 ```bash
 git clone https://github.com/SeoliWorks/Subscription-Manager.git
+cd root_dir
 npm install
 sudo docker-compose up -d
 npx drizzle-kit push
