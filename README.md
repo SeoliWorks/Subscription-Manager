@@ -11,7 +11,7 @@ git clone https://github.com/SeoliWorks/Subscription-Manager.git
 cd root_dir
 npm install
 sudo docker-compose up -d
-npx drizzle-kit push
+npx drizzle-kit push # Making new table on DB
 npm run dev
 ```
 ## Down docker:
