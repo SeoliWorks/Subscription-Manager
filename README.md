@@ -5,6 +5,20 @@
 
 -----
 
+First use:
+```bash
+git clone https://github.com/SeoliWorks/Subscription-Manager.git
+npm install
+sudo docker-compose up -d
+npx drizzle-kit push
+npm run dev
+```
+Down docker:
+```bash
+sudo docker-compose down
+```
+----
+
 # 設計仕様書: Subscription Manager (v1.0)
 
 ## 1\. プロジェクト概要
