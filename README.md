@@ -18,6 +18,13 @@ npm run dev
 ```bash
 sudo docker-compose down
 ```
+## Next or so:
+```bash
+sudo docker-compose up -d
+npm run dev
+sudo docker-compose down
+```
+
 ----
 
 # 設計仕様書: Subscription Manager (v1.0)
