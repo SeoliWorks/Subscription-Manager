@@ -12,7 +12,7 @@ cd "Subscription-Manager/root_dir"
 npm install
 sudo docker-compose up -d
 npx drizzle-kit push # Making new table on DB
-npm run dev
+npm run dev # ⇛ "localhost:3000"
 ```
 ## Down docker:
 ```bash
